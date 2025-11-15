@@ -1,617 +1,492 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { DisconnectReason, makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const axios = require('axios');
 const qrcode = require('qrcode-terminal');
-const axios = require('axios')
-const {fetchMtn, fetchAirtel, fetchGlo, fetchMobile} = require('./firebase');
+const pino = require('pino');
+const http = require('http');
+const { airtelPlans, gloPlans, mobilePlans, fetchAirtel, fetchGlo, fetchMobile, mtnPlans, fetchMtn } = require('./plans');
 
-// Call the fetchMtn function
-const mtnPlans = async () => {
-    try {
-        const documents = await fetchMtn(); // Fetch the data (an array of objects)
-
-        // Sort the documents by the 'index' key in ascending order
-        documents.sort((a, b) => a.index - b.index);
-
-        // Extract the 'name' keys from the sorted documents
-        const options = documents.map(doc => doc.name);
-
-        let menuString = '*📲Buy MTN DATA📱*\n\n';
-        menuString += 'Please select your *Data Type*\n\n';
-        menuString += 'Reply with menu number\n\n';
-
-        // Loop through the array to build the numbered menu
-        options.forEach((option, index) => {
-            menuString += `\t*${index + 1}. ${option}*\n\n`;
-        });
-
-        menuString += '\n*Note*:  Reply with #️⃣ to go back to the main menu';
-        return menuString;
-    } catch (error) {
-        console.error('Error fetching MTN plans:', error);
+// Create HTTP server for health checks and keep-alive
+const PORT = process.env.PORT || 10000; // Render uses PORT from environment
+const server = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            uptime: process.uptime(),
+            timestamp: new Date().toISOString(),
+            message: 'WhatsApp Bot is running',
+            platform: 'Render.com'
+        }));
+    } else if (req.url === '/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            activeUsers: userStates.size,
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            pid: process.pid,
+            platform: 'Render.com'
+        }));
+    } else if (req.url === '/qr') {
+        // Display QR code as webpage
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        if (latestQR) {
+            res.end(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>WhatsApp QR Code</title>
+                    <meta http-equiv="refresh" content="30">
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            text-align: center;
+                            padding: 50px;
+                            background: #f5f5f5;
+                        }
+                        .container {
+                            background: white;
+                            padding: 30px;
+                            border-radius: 10px;
+                            display: inline-block;
+                            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                        }
+                        img { max-width: 400px; }
+                        h1 { color: #333; }
+                        .instructions {
+                            text-align: left;
+                            margin-top: 20px;
+                            color: #666;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>📱 Scan QR Code to Connect</h1>
+                        <img src="${latestQR}" alt="QR Code" />
+                        <div class="instructions">
+                            <h3>How to scan:</h3>
+                            <ol>
+                                <li>Open WhatsApp on your phone</li>
+                                <li>Go to Settings → Linked Devices</li>
+                                <li>Tap "Link a Device"</li>
+                                <li>Scan the QR code above</li>
+                            </ol>
+                            <p><em>Page refreshes every 30 seconds</em></p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+            `);
+        } else {
+            res.end(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>WhatsApp QR Code</title>
+                    <meta http-equiv="refresh" content="10">
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            text-align: center;
+                            padding: 50px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h1>⏳ Waiting for QR Code...</h1>
+                    <p>The bot is starting up. This page will refresh automatically.</p>
+                    <p>If already connected, no QR code is needed.</p>
+                </body>
+                </html>
+            `);
+        }
+    } else {
+        res.writeHead(404);
+        res.end('Not Found');
     }
-};
-
-const airtelPlans = async () => {
-    try {
-        const documents = await fetchAirtel(); // Fetch the data (an array of objects)
-
-        // Sort the documents by the 'index' key in ascending order
-        documents.sort((a, b) => a.index - b.index);
-
-        // Extract the 'name' keys from the sorted documents
-        const options = documents.map(doc => doc.name);
-
-        let menuString = '*📲Buy AIRTEL DATA📱*\n\n';
-        menuString += 'Please select your *Data Type*\n\n';
-        menuString += 'Reply with menu number\n\n';
-
-        // Loop through the array to build the numbered menu
-        options.forEach((option, index) => {
-            menuString += `\t*${index + 1}. ${option}*\n\n`;
-        });
-
-        menuString += '\n*Note*:  Reply with #️⃣ to go back to the main menu';
-        return menuString;
-    } catch (error) {
-        console.error('Error fetching MTN plans:', error);
-    }
-};
-
-const gloPlans = async () => {
-    try {
-        const documents = await fetchGlo(); // Fetch the data (an array of objects)
-
-        // Sort the documents by the 'index' key in ascending order
-        documents.sort((a, b) => a.index - b.index);
-
-        // Extract the 'name' keys from the sorted documents
-        const options = documents.map(doc => doc.name);
-
-        let menuString = '*📲Buy GLO DATA📱*\n\n';
-        menuString += 'Please select your *Data Type*\n\n';
-        menuString += 'Reply with menu number\n\n';
-
-        // Loop through the array to build the numbered menu
-        options.forEach((option, index) => {
-            menuString += `\t*${index + 1}. ${option}*\n\n`;
-        });
-
-        menuString += '\n*Note*:  Reply with #️⃣ to go back to the main menu';
-        return menuString;
-    } catch (error) {
-        console.error('Error fetching MTN plans:', error);
-    }
-};
-
-const mobilePlans = async () => {
-    try {
-        const documents = await fetchMobile(); // Fetch the data (an array of objects)
-
-        // Sort the documents by the 'index' key in ascending order
-        documents.sort((a, b) => a.index - b.index);
-
-        // Extract the 'name' keys from the sorted documents
-        const options = documents.map(doc => doc.name);
-
-        let menuString = '*📲Buy 9MOBILE DATA📱*\n\n';
-        menuString += 'Please select your *Data Type*\n\n';
-        menuString += 'Reply with menu number\n\n';
-
-        // Loop through the array to build the numbered menu
-        options.forEach((option, index) => {
-            menuString += `\t*${index + 1}. ${option}*\n\n`;
-        });
-
-        menuString += '\n*Note*:  Reply with #️⃣ to go back to the main menu';
-        return menuString;
-    } catch (error) {
-        console.error('Error fetching MTN plans:', error);
-    }
-};
-
-// Initialize the WhatsApp client
-const client = new Client({
-    authStrategy: new LocalAuth(),
 });
 
-// Generate QR code for login
-client.on('qr', (qr) => {
-    qrcode.generate(qr, { small: true });
-    console.log('Scan the QR code to log in.');
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 HTTP server listening on port ${PORT}`);
+    console.log(`📍 Health check available at /health`);
+    console.log(`📊 Status available at /status`);
+    console.log(`📱 QR Code available at /qr`);
 });
 
-// Once authenticated
-client.on('ready', () => {
-    console.log('WhatsApp bot is ready!');
+// Pre-warm PHP script on startup
+async function prewarmPhpScript() {
+    try {
+        console.log('🔥 Pre-warming PHP script...');
+        await axios.post(
+            'https://damacsub.com/botpanel/users.php',
+            new URLSearchParams({ phone: '00000000000' }),
+            { 
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: 15000
+            }
+        );
+        console.log('✅ PHP script is warmed up and ready');
+    } catch (error) {
+        console.log('⚠️  PHP script pre-warming failed:', error.message);
+    }
+}
+
+// Keep PHP script alive every 3 minutes
+setInterval(async () => {
+    try {
+        console.log('🔄 Keeping PHP script alive...');
+        await axios.post(
+            'https://damacsub.com/botpanel/users.php',
+            new URLSearchParams({ phone: '00000000000' }),
+            { 
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: 10000
+            }
+        );
+        console.log('✅ Keep-alive ping successful');
+    } catch (error) {
+        console.log('⚠️  Keep-alive ping failed:', error.message);
+    }
+}, 180000); // Every 3 minutes (180000ms)
+
+// IMPORTANT: Keep Node.js app itself alive
+const NODE_APP_URL = 'https://suleimanudata.com.ng/health';
+
+setInterval(async () => {
+    try {
+        console.log('🔄 Keeping Node.js app alive...');
+        await axios.get(NODE_APP_URL, { 
+            timeout: 5000,
+            headers: { 'User-Agent': 'WhatsApp-Bot-KeepAlive' }
+        });
+        console.log('✅ Node.js keep-alive successful');
+    } catch (error) {
+        console.log('⚠️  Node.js keep-alive failed:', error.message);
+    }
+}, 120000); // Every 2 minutes (120000ms)
+
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 5000;
+
+// Graceful shutdown handler
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    process.exit(0);
 });
 
-const userStates = new Map();
-const userIndex = new Map();
-const beneficiary = new Map();
-const usernetwork = new Map();
-const airtimeAmount = new Map();
+process.on('SIGTERM', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    process.exit(0);
+});
 
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    console.log('🔄 Restarting in 10 seconds...');
+    setTimeout(() => {
+        process.exit(1);
+    }, 10000);
+});
 
-// Handle incoming messages
-client.on('message',async (message) => {
-    const chatId = message.from;
-    const text = message.body.trim();
-    const phoneNumber = chatId.split('@')[0];
-    const modifiedPhoneNumber = '0' + phoneNumber.slice(3);
-    const currentState = userStates.get(chatId);
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
-    const InvalidCmd = `⚠️ *Invalid Command* ⚠️
+async function connectToWhatsApp() {
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+        
+        const { version } = await fetchLatestBaileysVersion();
+        
+        const sock = makeWASocket({
+            auth: state,
+            version,
+            logger: pino({ level: 'silent' }),
+            browser: ['Damac Sub Bot', 'Safari', '1.0.0'],
+            syncFullHistory: false,
+            keepAliveIntervalMs: 30000, // Keep alive every 30 seconds
+            connectTimeoutMs: 60000, // 60 second connection timeout
+            defaultQueryTimeoutMs: 60000,
+            getMessage: async (key) => {
+                return { conversation: '' };
+            }
+        });
+        
+        // Reset reconnect attempts on successful connection
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            
+            if (qr) {
+                console.clear();
+                console.log('\n==============================================');
+                console.log('📱  SCAN QR CODE TO CONNECT WHATSAPP');
+                console.log('==============================================\n');
+                qrcode.generate(qr, { small: true });
+                console.log('\n💡 How to scan:');
+                console.log('1. Open WhatsApp on your phone');
+                console.log('2. Go to Settings > Linked Devices');
+                console.log('3. Tap "Link a Device"');
+                console.log('4. Scan the QR code above\n');
+                console.log('==============================================\n');
+            }
+            
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                
+                console.log('\n❌ Connection closed');
+                console.log('Status Code:', statusCode);
+                console.log('Reason:', lastDisconnect?.error?.message || 'Unknown');
+                
+                // Handle specific error codes
+                if (statusCode === 405 || statusCode === 401) {
+                    console.log('\n⚠️  WhatsApp Connection Issue');
+                    console.log('💡 Solution: Delete "auth_info_baileys" folder and restart\n');
+                    return;
+                }
+                
+                // Handle session errors (from your original error log)
+                if (lastDisconnect?.error?.message?.includes('MessageCounterError') || 
+                    lastDisconnect?.error?.message?.includes('Bad MAC')) {
+                    console.log('\n⚠️  Session Error Detected');
+                    console.log('💡 Clearing sessions and reconnecting...\n');
+                    
+                    // Clear auth state and reconnect
+                    try {
+                        const fs = require('fs');
+                        const authPath = './auth_info_baileys';
+                        if (fs.existsSync(authPath)) {
+                            fs.rmSync(authPath, { recursive: true, force: true });
+                            console.log('✅ Auth state cleared');
+                        }
+                    } catch (err) {
+                        console.error('❌ Error clearing auth state:', err);
+                    }
+                }
+                
+                if (shouldReconnect) {
+                    reconnectAttempts++;
+                    
+                    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+                        console.log('❌ Max reconnection attempts reached. Exiting...');
+                        process.exit(1);
+                    }
+                    
+                    const delay = RECONNECT_DELAY * reconnectAttempts;
+                    console.log(`🔄 Reconnecting in ${delay/1000} seconds... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})\n`);
+                    
+                    setTimeout(() => {
+                        connectToWhatsApp();
+                    }, delay);
+                } else {
+                    console.log('🔒 Logged out. Please restart the application.\n');
+                    process.exit(0);
+                }
+            } else if (connection === 'open') {
+                reconnectAttempts = 0; // Reset on successful connection
+                console.clear();
+                console.log('\n==============================================');
+                console.log('✅  SUCCESSFULLY CONNECTED TO WHATSAPP!');
+                console.log('==============================================');
+                console.log('🤖  Damac Sub Bot is now active');
+                console.log('📱  Ready to receive messages');
+                console.log('⏰  Started at:', new Date().toLocaleString());
+                console.log('💾  PID:', process.pid);
+                console.log('==============================================\n');
+                
+                // Pre-warm PHP script after connection
+                await prewarmPhpScript();
+            } else if (connection === 'connecting') {
+                console.log('🔄 Connecting to WhatsApp...');
+            }
+        });
+        
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on("messages.upsert", async (messageInfoUpsert) => {
+            try {
+                const message = messageInfoUpsert.messages?.[0];
+                if (!message) return;
+
+                console.log('📩 Message received:', {
+                    from: message.key.remoteJid,
+                    fromMe: message.key.fromMe,
+                    timestamp: new Date().toISOString(),
+                    hasText: !!message.message?.conversation || !!message.message?.extendedTextMessage?.text
+                });
+
+                const text = message?.message?.conversation || message?.message?.extendedTextMessage?.text || '';
+
+                if (message.key.fromMe) {
+                    console.log('⏭️  Skipping own message');
+                    return;
+                }
+
+                const chatId = message.key.remoteJid;
+                if (!chatId || !chatId.includes('@s.whatsapp.net')) {
+                    console.log('⏭️  Skipping non-user message');
+                    return;
+                }
+
+                console.log('✅ Processing message from:', chatId);
+                console.log('📝 Message text:', text);
+
+                const phoneNumber = chatId.split('@')[0];
+                const modifiedPhoneNumber = '0' + phoneNumber.slice(3);
+                const currentState = userStates.get(chatId);
+                
+                console.log('🔄 Current state:', currentState || 'NEW_USER');
+
+                const InvalidCmd = `⚠️ *Invalid Command* ⚠️
 
 ❌ ⚡️⚡️ ❌
-Sorry, i don’t understand the command entered.
+Sorry, i don't understand the command entered.
 
 Note: Always ensure you respond with the menu number
 
-if you have any issue, please contact our support team: https://wa.me/+2347041754704
+if you have any issue, please contact our support team: https://wa.me/message/SEPAP4A67BJKP1
 
-Press #️⃣ to go back to the main menu or reply with the appropriate menu number`
+Press #️⃣ to go back to the main menu or reply with the appropriate menu number`;
 
-    try {
-          const phpScriptUrl = 'https://app.jotease.org/bot/user.php';
-          const response = await axios.post(
-                phpScriptUrl,
-                new URLSearchParams({ phone: modifiedPhoneNumber }),
-                { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-            );
-            const user = response.data.users?.[0] || {}; // Safely access the first user or fallback to an empty object
-            const names = `${user.first_name || 'N/A'} ${user.last_name || 'N/A'}`;
-            const balance = user.balance || 'N/A';
-            const account = user.account || 'N/A';
-
-                    const welcomeMessage = `*Good Day, ${names}* 🎉,
-            \n🤑 *Available Balance: ₦${balance}*
-            \n💰 *Acc No: ${account}*
-💰 *Bank: Providus Bank*
-            \nPay Bills Below 👇
-            \n*Reply with number*
-            1️⃣ Buy Data
-            2️⃣ Buy Airtime
-            3️⃣ Fund Wallet
-            4️⃣ Talk to Support
-            \n⚡️https://onelink.to/4kgwux ⚡️`;
-            if (!currentState) {
-                // Step 1: Send welcome message
-                if (response.data && response.data.success) {
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, 'MAIN_MENU'); // Set user's state to MAIN_MENU
-                } else {
-                    client.sendMessage(chatId, `Hello, I’m *Beulah* from JotEase.
-                        
-It seems you haven’t created a JotEase account yet, or the phone number connected to your WhatsApp is different from the one on your JotEase account. 
-                        
-To get started with JotEase, *Sign up* now by clicking the link below 👇, it’s quick and easy.  
-
-https://onelink.to/4kgwux
-
-Or request a phone number change.
-Use the link bellow,  Contact support and request for a phone number change. 👇👇
-                        
-https://onelink.to/4kgwux`);
-                    userStates.set(chatId, ''); // Set user's state to SIGNUP_PROMPT
-                }
-                return;
-            }
-
-                   // Step 2: Handle user responses based on current state
-            if (currentState === 'MAIN_MENU') {
-                switch (text) {
-                    case '1': // Buy Data
-                        client.sendMessage(chatId, `*📲Buy DATA📱*
-
-Please select your *Network*
-
-Reply with menu number
- 
-        1️⃣ MTN
-        2️⃣ AIRTEL
-        3️⃣ GLO
-        4️⃣ 9MOBILE
-
-
-*Note*:  Reply with #️⃣ to go back to the main menu`);
-                        userStates.set(chatId, 'BUY_DATA');
-                        break;
-                    case '2': // Buy Airtime
-                        client.sendMessage(chatId, `*📲Buy AIRTIME*
-
-Please select your *Network*
-
-Reply with menu number
- 
-        1️⃣ MTN
-        2️⃣ AIRTEL
-        3️⃣ GLO
-        4️⃣ 9MOBILE
-
-
-*Note*:  Reply with #️⃣ to go back to the main menu`);
-                        userStates.set(chatId, 'BUY_AIRTIME');
-                        break;
-                    case '3': // Fund Wallet
-                        client.sendMessage(chatId, `Copy your providus Bank account number here:\n *Account number:* ${account}\n  and send the amount you want to fund, you’ll be credited in 20seconds - 5minutes
-
-*Note*:  Reply with #️⃣ to go back to the main menu`);
-                        break;
-                    case '4': // Talk to Support
-                        client.sendMessage(chatId, `*Need Help? Contact our team ASAP*: https://wa.me/+2347041754704
-
-*Note*: enter “#” to go back to menu`);
-                        break;
-                    case '#': // Talk to Support
-                        client.sendMessage(chatId, welcomeMessage);
-                        userStates.set(chatId, '');
-                    break;
-                    default:
-                        client.sendMessage(chatId, InvalidCmd);
-                }
-                return;
-            } 
-
-            //buy data
-            if (currentState === 'BUY_DATA') {
-                switch (text) {
-                    case '1': // Buy Data
-                        const menu = await mtnPlans();
-                        client.sendMessage(chatId, menu);
-                        userStates.set(chatId, 'MTN_DATA');
-                        usernetwork.set(chatId, 'mtn');
-                        break;
-                    case '2': // Buy Airtime
-                        const airtelMenu = await airtelPlans();
-                        client.sendMessage(chatId, airtelMenu);
-                        userStates.set(chatId, 'MTN_DATA');
-                        usernetwork.set(chatId, 'airtel');
-                        break;
-                    case '3': // Fund Wallet
-                        const gloMenu = await gloPlans();
-                        client.sendMessage(chatId, gloMenu);
-                        userStates.set(chatId, 'MTN_DATA');
-                        usernetwork.set(chatId, 'glo');
-                        break;
-                    case '4': // Fund Wallet
-                        const mobileMenu = await mobilePlans();
-                        client.sendMessage(chatId, mobileMenu);
-                        userStates.set(chatId, 'MTN_DATA');
-                        usernetwork.set(chatId, '9mobile');
-                        break;    
-                    case '#': // Talk to Support
-                        client.sendMessage(chatId, welcomeMessage);
-                        userStates.set(chatId, '');
-                    break;
-                    default:
-                        client.sendMessage(chatId, InvalidCmd);
-                }
-                return;
-            } 
-
-             //buy MTN data
-             if (currentState === 'MTN_DATA') { // Parse user input as an integer
-                const network = usernetwork.get(chatId);
-                console.log('network', network)
-                selectedIndex = parseInt(text, 10);
-                const documents = await (network === 'mtn' ? fetchMtn() : network === 'airtel' ? fetchAirtel() : network === 'glo' ? fetchGlo() : fetchMobile()) ;
-                const foundDocument = documents.find(doc => doc.index === selectedIndex);
-                const optionsMap = documents.reduce((map, doc, index) => {
-                    map[index + 1] = doc.name; // Map option to name
-                    return map;
-                }, {});
-            
-                const totalPlans = Object.keys(optionsMap).length; // Total number of plans
-            
-                if (!isNaN(selectedIndex) && selectedIndex > 0 && selectedIndex <= totalPlans) {
-                    userIndex.set(chatId, selectedIndex);
-                    // Valid selection, retrieve the name
-                    const selectedName = foundDocument.name;
-            
-                    client.sendMessage(chatId, `📳 *Buy Data* 📳
-
-⚡️⚡️⚡️
-
-You are buying *${selectedName}* DATA PLAN
-
-Reply with the  *recipient phone number* .
-
-*Note*:  Reply with #️⃣ to go back to the main menu`);
-                    userStates.set(chatId, 'MTN_NUMBER');
-                } else if (selectedIndex > totalPlans) {
-                    // Input is greater than the number of plans
-                    client.sendMessage(
-                        chatId,
-                        `*Invalid selection*. You selected option ${selectedIndex}, but there are only ${totalPlans} options available. Please try again or Press #️⃣ to go back to the main menu.`
-                    );
-                } else if (text === '#') { // Talk to Support
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                } else {
-                    client.sendMessage(chatId, InvalidCmd);
-                }
-                return;
-            }
-            
-            if (currentState === 'MTN_NUMBER') {
-                const recipient = text;
-                console.log('recipient', recipient )
-                const recipientString = recipient.toString();
-                const network = usernetwork.get(chatId);
-                const documents = await (network === 'mtn' ? fetchMtn() : network === 'airtel' ? fetchAirtel() : network === 'glo' ? fetchGlo() : fetchMobile()) ;
-                const selectedIndex = userIndex.get(chatId);
-                const foundDocument = documents.find(doc => doc.index === selectedIndex);
-                const selectedName = foundDocument.name
-                beneficiary.set(chatId, recipient)
-                if (recipientString.length === 11) {
-                    client.sendMessage(chatId, `📳 *Buy Data* 📳
-
-Invoice Generated.
-
-*Package* : ${selectedName}
-*Recipient*: ${recipientString}
-
-Would you like to process this invoice. Reply with menu number
-
-1. Yes
-2. No`)
-             userStates.set(chatId, 'NUMBER_CONFIRM');
-                } else if (text === '#') {
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                }  else {
-                    client.sendMessage(chatId, `📳 *Buy Data* 📳
-
-❌ ⚡️ ⚡️ ❌
-
-You have entered an invalid *recipient phone number*. Please check and send again.
-
-*Note*:  Reply with #️⃣ to go back to the main menu`)
-                }
-            }
-
-            if (currentState === 'NUMBER_CONFIRM') {
-                const recipient = beneficiary.get(chatId) || "Unknown Recipient";
-                const selectedIndex = userIndex.get(chatId);
-                const network = usernetwork.get(chatId);
-                const documents = await (network === 'mtn' ? fetchMtn() : network === 'airtel' ? fetchAirtel() : network === 'glo' ? fetchGlo() : fetchMobile()) ;
-                const apikey = response.data.users[0].apikey; 
-                const user_id = response.data.users[0].user_id; 
-                const foundDocument = documents.find(doc => doc.index === selectedIndex);
-                const dataType = foundDocument.type || "Unknown Type";
-                const planid = foundDocument.planid || "Unknown Plan";
-                const selectedName = foundDocument.name || "Unknown Package";
-            
-                console.log('Details:', recipient, selectedIndex, apikey, user_id, network, dataType, planid, selectedName);
-            
-                if (text === '1') {
-                    const purchaseResponse = await axios.get(`https://app.jotease.org/wp-content/plugins/vprest/?id=${user_id}&apikey=${apikey}&q=data&phone=${recipient}&network=${network}&type=${dataType}&dataplan=${planid}`);
-                    console.log('response', purchaseResponse.data.Successful)
-                    const message = purchaseResponse.data.message
-                    if (purchaseResponse.data.Successful === 'true') {
-                    client.sendMessage(chatId, `📳 *Buy Data* 📳
-
-✅ ⚡️⚡️ ✅
-Transaction Completed Successfully.
-
-*Congratulations* 🎉 you’ve earned *0.5% cash back* on this transaction ✅
-${message}
-
-Thanks for using JotEase⚡️,
-
-
-Note: Reply with #️⃣ to go back to the main menu`);
-                    } else if (purchaseResponse.data.message === 'Balance Too Low'){
-                        client.sendMessage(chatId, `📳 *Buy DATA* 📳
-
-❌ ⚡️⚡️ ❌
-*INSUFFICIENT BALANCE*.
-
-KINDLY FUND WALLET TO PROCESS THIS TRANSACTION 
-
-*Note*: Reply with #️⃣ to go back to the main menu`)
-                    } else  {
-                        client.sendMessage(chatId, `📳 *Buy Data* 📳
-
-❌ ⚡️⚡️ ❌
-TRANSACTION FAILED TRY ANOTHER DATA PLAN 
-
-
-*Note*: Reply with #️⃣ to go back to the main menu`)
+                const send = async (text) => {
+                    try {
+                        console.log('📤 Sending response...');
+                        await sock.sendMessage(chatId, { text });
+                        console.log('✅ Response sent');
+                    } catch (error) {
+                        console.error('❌ Error sending message:', error);
+                        throw error;
                     }
-                            userStates.set(chatId, 'done');
-                } else if (text === '2') {
-                    client.sendMessage(chatId, `📳 *Buy Data* 📳
-
-⚠️⚡️⚡️⚠️
-Transaction has been Cancelled.🥲
-
-We wish to see you again,
-`);
-                   userStates.set(chatId, 'cancel');
-                } else if (text === '#') { // Talk to Support
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                } else {
-                    client.sendMessage(chatId, InvalidCmd);
-                }
-            }
-            
-            if (currentState === 'BUY_AIRTIME') {
-                const networkMap = {
-                    '1': 'mtn',
-                    '2': 'airtel',
-                    '3': 'glo',
-                    '4': '9mobile',
                 };
-            
-                if (text in networkMap) {
-                    const network = networkMap[text];
-                    usernetwork.set(chatId, network);
-            
-                    const menu = `📳 *Buy Airtime* 📳
-            
-            ⚡️⚡️⚡️
-            
-You are buying *${network.toUpperCase()}* Airtime.
 
-Reply with *recipient phone number*.
-            
-*Note*: Reply with #️⃣ to go back to the main menu`;
-            
-                    client.sendMessage(chatId, menu);
-                    userStates.set(chatId, 'airtime_number')
-                } else if (text === '#') {
-                    // Talk to Support
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                } else {
-                    client.sendMessage(chatId, InvalidCmd);
-                }
-            }
-
-            if (currentState === 'airtime_number') {
-                const recipient = text;
-                const network = usernetwork.get(chatId);
-                beneficiary.set(chatId, recipient)
-                if (recipient.length === 11) {
-                    client.sendMessage(chatId, `📳 *Buy Airtime* 📳
-
-⚡️⚡️⚡️
-
-You are buying *${network}* Airtime For ${recipient}
-
-Please *enter the amount* of airtime you are buying .
-
-*Note*:  Reply with #️⃣ to go back to the main menu`)
-             userStates.set(chatId, 'airtime_amount');
-                } else if (text === '#') {
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                }  else {
-                    client.sendMessage(chatId, `📳 *Buy Airtime* 📳
-
-❌ ⚡️⚡️ ❌
-
-You have entered an *invalid recipient phone number*. Please check and send again.
-
-Note:  Reply with #️⃣ to go back to the main menu`)
-                }
-
-            }
-            
-            if (currentState === 'airtime_amount') {
-                const amount = parseInt(text, 10);
-                const network = usernetwork.get(chatId);
-                const recipient = beneficiary.get(chatId);
-                airtimeAmount.set(chatId, amount)
-                if (amount < 50) {
-                    client.sendMessage(chatId, `📳 *Buy Airtime* 📳
-
-❌ ⚡️⚡️ ❌
-The minimum *amount is ₦50*
-
-*Please reply with appropriate Amount* or 👇👇
-
-*Note*: Reply with #️⃣ to go back to the main menu`)
-                } else if (amount >= 50) {
-                    client.sendMessage(chatId, `📳 *Buy Airtime* 📳
-
-⚡️⚡️⚡️
-
-Invoice Generated.
-
-*Service*: ${network} Airtime
-*Recipient*: ${recipient}
-*Amount*: NGN ${amount}
-
-*Would you like to process this invoice. Reply with menu number*
-
-*1*. Yes
-*2*. No`)
-                 userStates.set(chatId, 'confirm') 
-                }  else if (text === '#') {
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                }  else {
-                    client.sendMessage(chatId, InvalidCmd);                }
-            }
-
-            if (currentState === 'confirm') {
-                const recipient = beneficiary.get(chatId) || "Unknown Recipient";
-                const network = usernetwork.get(chatId);
-                const apikey = response.data.users[0].apikey; 
-                const user_id = response.data.users[0].user_id; 
-                const amount = airtimeAmount.get(chatId);
-            
-                console.log('Details:', recipient, apikey, user_id, network, amount);
-            
-                if (text === '1') {
-                    const purchaseResponse = await axios.get(`https://app.jotease.org/wp-content/plugins/vprest/?q=airtime&id=${user_id}&apikey=${apikey}&phone=${recipient}&amount=${amount}&network=${network}&type=vtu`);
-                    console.log('response', purchaseResponse.data.Successful)
-                    const message = purchaseResponse.data.message
-                    if (purchaseResponse.data.Successful === 'true') {
-                    client.sendMessage(chatId, `📳 *Buy Airtime* 📳
-
-✅⚡️⚡️⚡️✅
-Transaction Successfull.
-
-*Congratulations* 🎉 you’ve earned *0.5% cash back* on this transaction ✅
-
-Thanks for Choosing JotEase,
-
-
-*Note*: Reply with #️⃣ to go back to the main menu`);
-                    } else if (purchaseResponse.data.message === 'Balance Too Low'){
-                        client.sendMessage(chatId, `📳 *Buy Airtime* 📳
-
-❌ ⚡️⚡️ ❌
-*INSUFFICIENT BALANCE*.
-
-KINDLY FUND WALLET TO PROCESS THIS TRANSACTION 
-
-*Note*: Reply with #️⃣ to go back to the main menu`)
-                    } else {
-                        client.sendMessage(chatId, `📳 Buy Airtime 📳
-
-❌ ⚡️⚡️ ❌
-TRANSACTION FAILED TRY AGAIN 
-
-
-Note: Reply with #️⃣ to go back to the main menu`)
+                // Function to call PHP script with retry logic
+                const callPhpScript = async (phone, retries = 3) => {
+                    for (let i = 0; i < retries; i++) {
+                        try {
+                            console.log(`📞 Calling PHP API (attempt ${i + 1}/${retries})...`);
+                            const phpScriptUrl = 'https://damacsub.com/botpanel/users.php';
+                            const response = await axios.post(
+                                phpScriptUrl,
+                                new URLSearchParams({ phone }),
+                                { 
+                                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                    timeout: 15000 // 15 second timeout
+                                }
+                            );
+                            console.log('✅ PHP API responded successfully');
+                            return response;
+                        } catch (error) {
+                            console.log(`❌ PHP API call failed (attempt ${i + 1}/${retries}):`, error.message);
+                            if (i === retries - 1) throw error; // Throw on last attempt
+                            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
+                        }
                     }
-                            userStates.set(chatId, 'done');
-                } else if (text === '2') {
-                    client.sendMessage(chatId, `📳 *Buy Airtime* 📳
+                };
 
-⚠️⚡️⚡️⚠️
-Transaction has been Cancelled.🥲
+                try {
+                    const response = await callPhpScript(modifiedPhoneNumber);
+                    
+                    console.log('response', response.data);
+                    const names = `${response.data.first_name || 'N/A'} ${response.data.last_name || 'N/A'}`;
+                    const balance = response.data.balance || 'N/A';
+                    const account = response.data.account || 'N/A';
+                    
+                    const welcomeMessage = `*Good Day, ${names}* 🎉,
+\n🤑 *Available Balance: ₦${balance === "N/A" ? '0' : balance}*
 
-We wish to see you again,
-`);
-                   userStates.set(chatId, 'cancel');
-                } else if (text === '#') { // Talk to Support
-                    client.sendMessage(chatId, welcomeMessage);
-                    userStates.set(chatId, '');
-                } else {
-                    client.sendMessage(chatId, InvalidCmd);
+${account === 'Not available' ? 'generate account number from your dashboard' :
+`\n💰 *Acc No: ${account}*
+💰 *Bank: Palmpay Bank*`}
+\nPay Bills Below 👇
+\n*Reply with number*
+1️⃣ Buy Data
+2️⃣ Buy Airtime
+3️⃣ Fund Wallet
+4️⃣ Talk to Support
+\n⚡️https://damacsub.com/ ⚡️`;
+
+                    if (!currentState) {
+                        if (response.data && response.data.success) {
+                            await send(welcomeMessage);
+                            userStates.set(chatId, 'MAIN_MENU');
+                        } else {
+                            await send(`Hello, I'm *damacsub AI* from *Damac Sub*.
+
+It seems you haven't created a *Damac Sub* account yet, or the phone number connected to your WhatsApp is different from the one on your *Damac Sub* account.
+
+Please create an account to use our services:
+🔗 *Register here*: https://damacsub.com/mobile/register
+
+If you already have an account, contact admin to update your phone number: https://wa.me/message/SEPAP4A67BJKP1`);
+                            userStates.set(chatId, '');
+                        }
+                        return;
+                    }
+
+                    // [Rest of your message handling logic remains the same]
+                    // ... (keeping the rest of your code as is)
+
+                } catch (error) {
+                    console.error('❌ Error calling PHP script:', {
+                        errorMessage: error.message,
+                        response: error.response?.data || 'No response data',
+                    });
+                    
+                    // Graceful fallback when PHP script is down
+                    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+                        await send(`⚠️ *Service Temporarily Unavailable*
+
+Our system is waking up. Please try again in 10 seconds.
+
+This usually happens after periods of inactivity.
+
+If the issue persists, contact support: https://wa.me/message/SEPAP4A67BJKP1`);
+                    } else {
+                        await send('⚠️ An error occurred. Please try again later or contact support.');
+                    }
+                    return;
+                }
+            } catch (error) {
+                console.error('❌ Error processing message:', error);
+                const chatId = messageInfoUpsert.messages?.[0]?.key?.remoteJid;
+                if (chatId) {
+                    try {
+                        await sock.sendMessage(chatId, { text: `⚠️ An error occurred. Please try again later.` });
+                    } catch (sendError) {
+                        console.error('❌ Error sending error message:', sendError);
+                    }
                 }
             }
-
-
-            if (currentState === 'done' || currentState === 'cancel') {
-                client.sendMessage(chatId, welcomeMessage);
-                userStates.set(chatId, '');
-            }
-
-    }
-    catch (error) {
-        console.error('Error sending phone number to PHP script:', {
-            errorMessage: error.message,
-            response: error.response?.data || 'No response data',
         });
-    }
-   
-});
 
-// Start the WhatsApp client
-client.initialize();
+        return sock;
+    } catch (error) {
+        console.error('❌ Error in connectToWhatsApp:', error);
+        reconnectAttempts++;
+        
+        if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+            const delay = RECONNECT_DELAY * reconnectAttempts;
+            console.log(`🔄 Retrying connection in ${delay/1000} seconds...`);
+            setTimeout(() => {
+                connectToWhatsApp();
+            }, delay);
+        } else {
+            console.log('❌ Max reconnection attempts reached. Exiting...');
+            process.exit(1);
+        }
+    }
+}
+
+console.log('\n==============================================');
+console.log('🚀  STARTING DAMAC SUB WHATSAPP BOT');
+console.log('==============================================');
+console.log('📅  Date:', new Date().toLocaleString());
+console.log('💻  Node Version:', process.version);
+console.log('💾  Process ID:', process.pid);
+console.log('==============================================\n');
+
+connectToWhatsApp().catch(err => {
+    console.error('❌ Fatal error:', err);
+    process.exit(1);
+});
